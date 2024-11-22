@@ -31,9 +31,14 @@ import logging
 import tempfile
 import asyncio
 import errno
+import glob
 import pathlib
+import platform
+import shutil
 import signal
+import stat
 from subprocess import Popen, PIPE
+from urllib.parse import quote
 from .context import get_context
 from .kasusererror import KasUserError, CommandExecError
 
@@ -237,6 +242,60 @@ def repos_apply_patches(repos):
         raise TaskExecError('apply patches', e.ret_code)
 
 
+def get_buildtools_upstream():
+    arch = platform.machine()
+    ctx = get_context()
+    conf_buildtools = get_context().config.get_buildtools()
+    release = conf_buildtools['release']
+
+    if conf_buildtools['base_url']:
+        base_url = conf_buildtools['base_url']
+    else:
+        yocto_releases = "https://downloads.yoctoproject.org/releases/yocto"
+        base_url = f"{yocto_releases}/yocto-{release}/buildtools/"
+
+    if conf_buildtools['filename']:
+        filename = conf_buildtools['filename']
+    else:
+        filename = f"{arch}-buildtools-extended-nativesdk-standalone-{release}.sh"
+
+    # Enable extended buildtools tarball
+    buildtools_url = f"{base_url}/{quote(filename)}"
+    tmpbuildtools = os.path.join(conf_buildtools['dir'], filename)
+
+    logging.info(f"Downloading Buildtools {release}")
+    # Download installer
+    fetch_cmd = ['wget', '-q', '-O', tmpbuildtools, buildtools_url]
+    (ret, _) = run_cmd(fetch_cmd, cwd=ctx.kas_work_dir)
+
+    # Make installer executable
+    st = os.stat(tmpbuildtools)
+    os.chmod(tmpbuildtools, st.st_mode | stat.S_IEXEC)
+
+    # Run installer
+    installer_cmd = [tmpbuildtools, '-d', conf_buildtools['dir'], '-y']
+    env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}
+    (ret, _) = run_cmd(installer_cmd, cwd=ctx.kas_work_dir, env=env)
+    if ret != 0:
+        raise InitBuildEnvError("Could not run buildtools installer")
+
+
+def get_buildtools_version():
+    conf_buildtools = get_context().config.get_buildtools()
+    version_file = glob.glob(os.path.join(conf_buildtools['dir'], "version-*"))
+
+    if len(version_file) == 1:
+        version_file = os.path.realpath(version_file[0])
+    else:
+        logging.warning("Unable to read buildtools version.")
+        return -1
+
+    with open(version_file, 'r') as f:
+        lines = f.readlines()
+
+    return lines[1].split(':')[1].strip()
+
+
 def get_build_environ(build_system):
     """
         Creates the build environment variables.
@@ -267,9 +326,38 @@ def get_build_environ(build_system):
     if not init_repo:
         raise InitBuildEnvError('Did not find any init-build-env script')
 
+    conf_buildtools = get_context().config.get_buildtools()
+
+    buildtools_env = ""
+    if "dir" in conf_buildtools:
+        if not os.listdir(conf_buildtools['dir']):
+            # Directory is empty, try to fetch from upstream
+            logging.info(f"Buildtools ({conf_buildtools['dir']}): directory is empty")
+            if "release" in conf_buildtools:
+                get_buildtools_upstream()
+            else:
+                raise InitBuildEnvError('Unable to fetch buildtools from upstream:'
+                                        'release was not set')
+        else:
+            # Directory is not empty: fetch buildtools if the versions don't match
+            if "release" in conf_buildtools:
+                found_version = get_buildtools_version()
+                if found_version != conf_buildtools['release']:
+                    logging.warning("Buildtools: release mismatch")
+                    logging.info(f"Release: {conf_buildtools['release']}")
+                    logging.info(f"Found version: {found_version}")
+                    shutil.rmtree(os.path.realpath(conf_buildtools['dir']))
+                    os.makedirs(os.path.realpath(conf_buildtools['dir']))
+                    get_buildtools_upstream()
+
+        envfiles = glob.glob(os.path.join(conf_buildtools['dir'], "environment-setup-*"))
+        if len(envfiles) == 1:
+            buildtools_env = "source {}\n".format(os.path.realpath(envfiles[0]))
+
     with tempfile.TemporaryDirectory() as temp_dir:
         script = f"""#!/bin/bash
         set -e
+        {buildtools_env}
         source {init_script} $1 > /dev/null
         env
         """
