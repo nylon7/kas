@@ -487,6 +487,60 @@ Configuration reference
   ``kas-container`` script. It must not be set manually and might only be
   defined in the top-level ``.config.yaml`` file.
 
+``buildtools``: dict [optional]
+  Provides variables to define which buildtools version should be fetched and
+  where it is (or will be) installed. At least ``dir`` and ``release`` should be
+  set. If the directory pointed by ``dir`` is empty, Kas will try to download
+  and install buildtools. If ``dir`` already has buildtools installed, Kas will
+  check the ``Distro Version`` line in the version file, and if it doesn't match
+  with ``release``, the directory will be cleaned and Kas will download
+  buildtools according to ``release``. As for the optional variables, they are
+  meant to be used to fetch unofficial (i.e., custom) buildtools. Finally, the
+  environment-setup script will run before bitbake, so the whole buildtools
+  environment will be available. More information on how to install or generate
+  buildtools can be found at: |yp_doc_buildtools|
+
+  ``dir``: string
+    The path to buildtools' installation directory.
+
+  ``release``: string
+    The buildtools version to be fetched. If the path set by ``dir`` is not
+    empty, its buildtools version will be read, and if it doesn't match
+    ``release``, the directory will be cleaned and the version set by
+    ``release`` will be fetched instead.
+
+  ``base_url``: string [optional]
+    This variable represents the URL to be passed to ``wget``, excluding
+    buildtools script filename. If this variable is not set, the default value
+    will be Yocto's standard sources, using ``release`` variable:
+    ``https://downloads.yoctoproject.org/releases/yocto/yocto-{release}/buildtools/``
+
+  ``filename``: string [optional]
+    Appended to ``base_url`` to form the whole URL to be passed to ``wget``, if
+    set. If not set, Kas will combine the platform architecture and release to
+    form the standard script filename:
+    ``{arch}-buildtools-extended-nativesdk-standalone-{release}.sh``
+
+  Example:
+
+  .. code-block:: yaml
+
+      buildtools:
+        dir: downloads/buildtools
+        release: "5.0.5"
+
+  And for unofficial sources:
+
+  .. code-block:: yaml
+
+      buildtools:
+        dir: downloads/buildtools
+        release: "1.0.0"
+        base_url: https://downloads.mysources.com/yocto/buildtools/
+        filename: x86_64-buildtools-beta-testing-1.0.0.sh
+
+.. |yp_doc_buildtools| replace:: https://docs.yoctoproject.org/dev/ref-manual/system-requirements.html#downloading-a-pre-built-buildtools-tarball
+
 .. _example-configurations-label:
 
 Example project configurations
