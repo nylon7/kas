@@ -239,3 +239,27 @@ class Config:
             foundfiles.extend([(name, f) for f in files])
         return [(n, f.relative_to(self._build_dir))
                 for n, f in foundfiles]
+
+    def get_buildtools(self):
+        """
+            First, returns the installed buildtools directory. Then,
+            the buildtools release number and URL are also returned.
+            These are used so Kas knows which buildtools to fetch
+            and from what source.
+        """
+        buildtools = self._config.get('buildtools', {})
+        if not buildtools:
+            return {}
+
+        conf = {'dir': buildtools['dir'], 'release': buildtools['release']}
+        if 'base_url' in buildtools:
+            conf['base_url'] = buildtools['base_url']
+        else:
+            conf['base_url'] = None
+
+        if 'filename' in buildtools:
+            conf['filename'] = buildtools['filename']
+        else:
+            conf['filename'] = None
+
+        return conf
