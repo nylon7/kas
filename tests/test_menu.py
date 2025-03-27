@@ -22,23 +22,29 @@
 
 import os
 import shutil
+import snack
+import pytest
 from kas import kas
 
-INPUTS = iter([' ', None, ' ', None])
-ACTIONS = iter([None, 'build', None, 'build'])
-SELECTIONS = iter([0, 3])
 
+@pytest.fixture(autouse=True)
+def patch_kas(monkeykas):
+    INPUTS = iter([' ', None, ' ', None])
+    ACTIONS = iter([None, 'build', None, 'build'])
+    SELECTIONS = iter([0, 3])
 
-def mock_runOnce(unused1):
-    return next(INPUTS)
+    def mock_runOnce(unused1):
+        return next(INPUTS)
 
+    def mock_buttonPressed(unused1, unused2):
+        return next(ACTIONS)
 
-def mock_buttonPressed(unused1, unused2):
-    return next(ACTIONS)
+    def mock_current(unused1):
+        return next(SELECTIONS)
 
-
-def mock_current(unused1):
-    return next(SELECTIONS)
+    monkeykas.setattr(snack.GridFormHelp, 'runOnce', mock_runOnce)
+    monkeykas.setattr(snack.ButtonBar, 'buttonPressed', mock_buttonPressed)
+    monkeykas.setattr(snack.Listbox, 'current', mock_current)
 
 
 def file_contains(filename, expected):
@@ -54,16 +60,10 @@ def check_bitbake_options(expected):
         return file.readline() == expected
 
 
-def test_menu(monkeypatch, tmpdir):
-    tdir = str(tmpdir.mkdir('test_menu'))
-    shutil.rmtree(tdir, ignore_errors=True)
+def test_menu(monkeykas, tmpdir):
+    tdir = str(tmpdir / 'test_menu')
     shutil.copytree('tests/test_menu', tdir)
-    cwd = os.getcwd()
-    os.chdir(tdir)
-
-    monkeypatch.setattr('snack.GridFormHelp.runOnce', mock_runOnce)
-    monkeypatch.setattr('snack.ButtonBar.buttonPressed', mock_buttonPressed)
-    monkeypatch.setattr('snack.Listbox.current', mock_current)
+    monkeykas.chdir(tdir)
 
     # select opt1 & build
     kas.kas(['menu'])
@@ -81,4 +81,21 @@ def test_menu(monkeypatch, tmpdir):
     assert file_contains('build/conf/local.conf', 'OPT1 = "1"\n')
     assert check_bitbake_options('-c build target2\n')
 
-    os.chdir(cwd)
+
+def test_menu_inc_workdir(monkeykas, tmpdir):
+    tdir = str(tmpdir / 'test_menu_inc')
+    kas_workdir = str(tmpdir / 'test_menu_inc' / 'out')
+    shutil.copytree('tests/test_menu', tdir)
+    monkeykas.chdir(tdir)
+    os.mkdir(kas_workdir)
+    monkeykas.setenv('KAS_WORK_DIR', kas_workdir)
+    kas.kas(['menu'])
+
+
+def test_menu_implicit_workdir(monkeykas, tmpdir):
+    tdir = str(tmpdir / 'test_menu_iwd')
+    kas_workdir = str(tmpdir / 'test_menu_iwd_out')
+    shutil.copytree('tests/test_menu', tdir)
+    os.mkdir(kas_workdir)
+    monkeykas.chdir(kas_workdir)
+    kas.kas(['menu', tdir + '/Kconfig'])

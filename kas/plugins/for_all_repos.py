@@ -48,21 +48,35 @@
       * ``KAS_REPO_URL``: The URL from which this repository was cloned, or an
         empty string if no remote URL was given in the config file.
 
+      * ``KAS_REPO_COMMIT``: The commit ID which was checked out for this
+        repository, or an empty string if no commit was given in the config
+        file.
+
+      * ``KAS_REPO_BRANCH``: The branch which was checked out for this
+        repository, or an empty string if no branch was given in the config
+        file.
+
+      * ``KAS_REPO_TAG``: The tag which was checked out for this repository,
+        or an empty string if no tag was given in the config file.
+
       * ``KAS_REPO_REFSPEC``: The refspec which was checked out for this
         repository, or an empty string if no refspec was given in the config
-        file.
+        file. This variable is obsolete and will be removed when support for
+        respec keys is removed as well. Migrate your repos to commit/branch
+        and use the related variables instead.
 """
 
 import logging
 import os
 import subprocess
-import sys
 from kas.context import create_global_context
 from kas.config import Config
 from kas.libcmds import Macro, Command, SetupHome
 from kas.libkas import setup_parser_common_args
+from kas.libkas import setup_parser_keep_config_unchanged_arg
 from kas.libkas import setup_parser_preserve_env_arg
 from kas.libkas import run_handle_preserve_env_arg
+from kas.kasusererror import CommandExecError
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017-2018'
@@ -78,6 +92,7 @@ class ForAllRepos:
     def setup_parser(cls, parser):
         setup_parser_common_args(parser)
         setup_parser_preserve_env_arg(parser)
+        setup_parser_keep_config_unchanged_arg(parser)
         parser.add_argument('command',
                             help='Command to be executed as a string.')
 
@@ -107,14 +122,17 @@ class ForAllReposCommand(Command):
                 'KAS_REPO_NAME': repo.name,
                 'KAS_REPO_PATH': repo.path,
                 'KAS_REPO_URL': '' if repo.operations_disabled else repo.url,
+                'KAS_REPO_COMMIT': '' if repo.operations_disabled
+                                   else (repo.commit or ''),
+                'KAS_REPO_BRANCH': repo.branch or '',
+                'KAS_REPO_TAG': repo.tag or '',
                 'KAS_REPO_REFSPEC': repo.refspec or '',
             }
             logging.info('%s$ %s', repo.path, self.command)
             retcode = subprocess.call(self.command, shell=True, cwd=repo.path,
                                       env=env)
             if retcode != 0:
-                logging.error('Command failed with return code %d', retcode)
-                sys.exit(retcode)
+                raise CommandExecError(self.command, retcode)
 
 
 __KAS_PLUGINS__ = [ForAllRepos]

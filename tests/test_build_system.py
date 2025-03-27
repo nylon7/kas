@@ -20,16 +20,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os
 import shutil
 from kas import kas
 
 
-def test_build_system(changedir, tmpdir):
-    tdir = str(tmpdir.mkdir('test_build_system'))
-    shutil.rmtree(tdir, ignore_errors=True)
+def test_build_system(monkeykas, tmpdir):
+    tdir = str(tmpdir / 'test_build_system')
     shutil.copytree('tests/test_build_system', tdir)
-    os.chdir(tdir)
+    monkeykas.chdir(tdir)
 
     kas.kas(['shell', 'test-oe.yml', '-c', 'true'])
     with open('build-env', 'r') as f:
@@ -42,3 +40,34 @@ def test_build_system(changedir, tmpdir):
     kas.kas(['shell', 'test-openembedded.yml', '-c', 'true'])
     with open('build-env', 'r') as f:
         assert f.readline().strip() == 'openembedded'
+
+
+def test_gitconfig(monkeykas, tmpdir, capsys):
+    tdir = str(tmpdir / 'test_gitconfig')
+    shutil.copytree('tests/test_build_system', tdir)
+    monkeykas.chdir(tdir)
+
+    kas.kas(['shell', 'test-oe.yml', '-c',
+             f'git config --get user.name > {tdir}/user.name'])
+    with open(f'{tdir}/user.name', 'r') as f:
+        assert f.readline().strip() == 'kas User'
+
+    monkeykas.setenv('GITCONFIG_FILE', f'{tdir}/gitconfig')
+    with open(f'{tdir}/gitconfig', 'w') as f:
+        f.write('[user]\n')
+        f.write('\temail = kas@kastest.io\n')
+        f.write('[url "git@github.com:"]\n')
+        f.write('\tinsteadOf = git://github\n')
+        f.write('\tinsteadOf = git://github.io\n')
+    kas.kas(['shell', 'test-oe.yml', '-c',
+             f'git config --get user.email > {tdir}/user.email'])
+    kas.kas(['shell', 'test-oe.yml', '-c',
+             'git config --get-all "url.git@github.com:.insteadof" '
+             f'> {tdir}/url'])
+    # check if user is restored after patching
+    with open(f'{tdir}/user.email', 'r') as f:
+        assert f.readline().strip() == 'kas@kastest.io'
+    # check the multi-key url rewrites
+    with open(f'{tdir}/url', 'r') as f:
+        assert f.readline().strip() == 'git://github'
+        assert f.readline().strip() == 'git://github.io'

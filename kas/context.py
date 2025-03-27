@@ -25,6 +25,8 @@
 
 import os
 import logging
+from enum import Enum
+from kas.kasusererror import KasUserError
 
 try:
     import distro
@@ -66,6 +68,25 @@ def get_context():
     return __context__
 
 
+class ManagedEnvironment(Enum):
+    """
+    Managed environments are well-known executors (like CI systems)
+    that kas can detect and adapt to.
+    """
+    GITHUB_ACTIONS = 1
+    GITLAB_CI = 2
+    VSCODE_REMOTE_CONTAINERS = 3
+
+    def __str__(self):
+        if self == self.GITHUB_ACTIONS:
+            return 'GitHub Actions'
+        if self == self.GITLAB_CI:
+            return 'GitLab CI'
+        if self == self.VSCODE_REMOTE_CONTAINERS:
+            return 'VSCode Remote Containers'
+        return f'{self.name}'
+
+
 class Context:
     """
         Implements the kas build context.
@@ -78,6 +99,10 @@ class Context:
         self.__kas_build_dir = os.path.abspath(build_dir)
         ref_dir = os.environ.get('KAS_REPO_REF_DIR', None)
         self.__kas_repo_ref_dir = os.path.abspath(ref_dir) if ref_dir else None
+        clone_depth = os.environ.get('KAS_CLONE_DEPTH', '0')
+        if not clone_depth.isdigit():
+            raise KasUserError('KAS_CLONE_DEPTH must be a number')
+        self.repo_clone_depth = max(int(clone_depth), 0)
         self.setup_initial_environ()
         self.config = None
         self.args = args
@@ -111,6 +136,26 @@ class Context:
             if val:
                 self.environ[key] = val
 
+        # make remote containers environment available in kas
+        if self.managed_env == ManagedEnvironment.VSCODE_REMOTE_CONTAINERS:
+            for k in os.environ.keys():
+                if k.startswith('REMOTE_CONTAINERS_'):
+                    self.environ[k] = os.environ[k]
+
+    @staticmethod
+    def _get_managed_env():
+        """
+            Detects if kas is running in well-known environment (e.g. a
+            CI system). Returns the identifier of the CI system or None.
+        """
+        if os.environ.get('GITHUB_ACTIONS', False) == 'true':
+            return ManagedEnvironment.GITHUB_ACTIONS
+        if os.environ.get('GITLAB_CI', False) == 'true':
+            return ManagedEnvironment.GITLAB_CI
+        if os.environ.get('REMOTE_CONTAINERS', False) == 'true':
+            return ManagedEnvironment.VSCODE_REMOTE_CONTAINERS
+        return None
+
     @property
     def build_dir(self):
         """
@@ -139,3 +184,7 @@ class Context:
     @property
     def update(self):
         return getattr(self.args, 'update', None)
+
+    @property
+    def managed_env(self):
+        return self._get_managed_env()

@@ -1,7 +1,11 @@
+#!/bin/sh
 #
 # kas - setup tool for bitbake based projects
 #
-# Copyright (c) Siemens AG, 2022
+# Copyright (c) Siemens AG, 2024
+#
+# Authors:
+#  Felix Moessbauer <felix.moessbauer@siemens.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,17 +24,18 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-#
 
-header:
-  version: 11
+# Extract the usage information of kas-container and convert it to rst
+# to be included in the documentation.
 
-target: zlib-native
-
-repos:
-  poky:
-    url: https://git.yoctoproject.org/poky.git
-    refspec: 387ab5f18b17c3af3e9e30dc58584641a70f359f
-    layers:
-      meta:
-      meta-poky:
+cat - | \
+    sed    's/^Usage:/|SYNOPSIS|\n----------\n/g' | \
+    sed -e 's/^\s*kas-container /| kas-container /g' | \
+    # unwrap long lines
+    perl -0pe 's/\n\s\s+/ /g' | \
+    sed    's/^Positional arguments:/|KAS-COMMANDS|\n--------------/g' | \
+    # each commands starts with a new line
+    sed -r 's/^(build|checkout|dump|lock|shell|for-all-repos|clean|cleansstate|cleanall|menu)\t\t*(.*)$/:\1: \2/g' | \
+    sed    's/^Optional arguments:/|OPTIONS|\n---------/g' | \
+    sed    '/^You can force/d' | \
+    cat

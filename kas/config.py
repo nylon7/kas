@@ -24,8 +24,11 @@
 """
 
 import os
+import json
+from pathlib import Path
 from .repos import Repo
 from .includehandler import IncludeHandler, IncludeException
+from .kasusererror import ArtifactNotFoundError
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017-2021'
@@ -40,13 +43,14 @@ class Config:
     def __init__(self, ctx, filename, target=None, task=None):
         self._override_target = target
         self._override_task = task
+        self._build_dir = ctx.build_dir
         self._config = {}
         if not filename:
             filename = os.path.join(ctx.kas_work_dir, CONFIG_YAML_FILE)
 
         self.filenames = [os.path.abspath(configfile)
                           for configfile in filename.split(':')]
-        self.top_repo_path = Repo.get_root_path(
+        top_repo_path = Repo.get_root_path(
             os.path.dirname(self.filenames[0]))
 
         repo_paths = [Repo.get_root_path(os.path.dirname(configfile),
@@ -58,8 +62,13 @@ class Config:
                                    'belong to the same repository or all '
                                    'must be outside of versioning control')
 
-        self.handler = IncludeHandler(self.filenames, self.top_repo_path)
+        update = ctx.args.update if hasattr(ctx.args, 'update') else False
+
+        self.handler = IncludeHandler(self.filenames,
+                                      top_repo_path,
+                                      not update)
         self.repo_dict = self._get_repo_dict()
+        self.repo_cfg_hashes = {}
 
     def get_build_system(self):
         """
@@ -104,11 +113,29 @@ class Config:
             `name`.
         """
         repo_defaults = self._config.get('defaults', {}).get('repos', {})
+        overrides = self._config.get('overrides', {}) \
+                                .get('repos', {}).get(name, {})
         config = self.get_repos_config()[name] or {}
-        return Repo.factory(name,
-                            config,
-                            repo_defaults,
-                            self.top_repo_path)
+        top_repo_path = self.handler.get_top_repo_path()
+
+        # Check if we have this repo with an identical config already.
+        # As this function is called across various places and with different
+        # configurations (e.g. due to updates from transitive includes),
+        # we cache the results.
+        args = (name, config, repo_defaults, top_repo_path, overrides)
+        return self._get_or_create_repo(args)
+
+    def _get_or_create_repo(self, args):
+        """
+            Get a repo from the cache and insert it if not existing.
+            Creating repos is expensive due to external commands being called.
+        """
+        encoded = json.dumps(args, sort_keys=True).encode()
+        if encoded in self.repo_cfg_hashes:
+            return self.repo_cfg_hashes[encoded]
+        repo = Repo.factory(*args)
+        self.repo_cfg_hashes[encoded] = repo
+        return repo
 
     def _get_repo_dict(self):
         """
@@ -149,7 +176,7 @@ class Config:
         """
         header = ''
         for key, value in sorted(self._config.get(header_name, {}).items()):
-            header += '# {}\n{}\n'.format(key, value)
+            header += f'# {key}\n{value}\n'
         return header
 
     def get_bblayers_conf_header(self):
@@ -195,3 +222,44 @@ class Config:
             if target.startswith('multiconfig:') or target.startswith('mc:'):
                 multiconfigs.add(target.split(':')[1])
         return ' '.join(multiconfigs)
+
+    def get_artifacts(self, missing_ok=True):
+        """
+            Returns the found artifacts after glob expansion, relative
+            to the build_dir as a list of tuples (name, path).
+            If missing_ok=False, raises an ArtifactNotFoundError if no
+            artifact for a given name is found.
+        """
+        arts = self._config.get('artifacts', {})
+        foundfiles = []
+        for name, art in arts.items():
+            files = list(Path(self._build_dir).glob(art))
+            if not missing_ok and len(files) == 0:
+                raise ArtifactNotFoundError(name, art)
+            foundfiles.extend([(name, f) for f in files])
+        return [(n, f.relative_to(self._build_dir))
+                for n, f in foundfiles]
+
+    def get_buildtools(self):
+        """
+            First, returns the installed buildtools directory. Then,
+            the buildtools release number and URL are also returned.
+            These are used so Kas knows which buildtools to fetch
+            and from what source.
+        """
+        buildtools = self._config.get('buildtools', {})
+        if not buildtools:
+            return {}
+
+        conf = {'dir': buildtools['dir'], 'release': buildtools['release']}
+        if 'base_url' in buildtools:
+            conf['base_url'] = buildtools['base_url']
+        else:
+            conf['base_url'] = None
+
+        if 'filename' in buildtools:
+            conf['filename'] = buildtools['filename']
+        else:
+            conf['filename'] = None
+
+        return conf

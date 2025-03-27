@@ -40,13 +40,14 @@
 import logging
 import os
 import subprocess
-import sys
 from kas.context import create_global_context
 from kas.config import Config
 from kas.libcmds import Macro, Command, SetupHome
 from kas.libkas import setup_parser_common_args
+from kas.libkas import setup_parser_keep_config_unchanged_arg
 from kas.libkas import setup_parser_preserve_env_arg
 from kas.libkas import run_handle_preserve_env_arg
+from kas.kasusererror import CommandExecError
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017-2018'
@@ -68,9 +69,7 @@ class Shell:
 
         setup_parser_common_args(parser)
         setup_parser_preserve_env_arg(parser)
-        parser.add_argument('-k', '--keep-config-unchanged',
-                            help='Skip steps that change the configuration',
-                            action='store_true')
+        setup_parser_keep_config_unchanged_arg(parser)
         parser.add_argument('-c', '--command',
                             help='Run command',
                             default='')
@@ -84,16 +83,6 @@ class Shell:
         ctx.config = Config(ctx, args.config)
 
         run_handle_preserve_env_arg(ctx, os, args, SetupHome)
-
-        if args.keep_config_unchanged:
-            # Skip the tasks which would change the config of the build
-            # environment
-            args.skip += [
-                'setup_dir',
-                'finish_setup_repos',
-                'repos_apply_patches',
-                'write_bbconfig',
-            ]
 
         macro = Macro()
         macro.add(ShellCommand(args.command))
@@ -124,8 +113,8 @@ class ShellCommand(Command):
             cmd.append(self.cmd)
         ret = subprocess.call(cmd, env=ctx.environ, cwd=ctx.build_dir)
         if ret != 0:
-            logging.error('Shell returned non-zero exit status %d', ret)
-            sys.exit(ret)
+            logging.error('Shell returned non-zero exit status')
+            raise CommandExecError(cmd, ret, True)
 
 
 __KAS_PLUGINS__ = [Shell]

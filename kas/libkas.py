@@ -23,6 +23,7 @@
     This module contains the core implementation of kas.
 """
 
+import argparse
 import re
 import os
 import sys
@@ -30,13 +31,43 @@ import logging
 import tempfile
 import asyncio
 import errno
+import glob
 import pathlib
+import platform
+import shutil
 import signal
+import stat
 from subprocess import Popen, PIPE
+from urllib.parse import quote
 from .context import get_context
+from .kasusererror import KasUserError, CommandExecError
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017-2018'
+
+
+class InitBuildEnvError(KasUserError):
+    """
+    Error related to the OE / ISAR environment setup scripts
+    """
+    pass
+
+
+class EnvNotValidError(KasUserError):
+    """
+    The caller environment is not suited for the requested operation
+    """
+    pass
+
+
+class TaskExecError(KasUserError):
+    """
+    Similar to :class:`kas.kasusererror.CommandExecError` but for kas
+    internal tasks
+    """
+    def __init__(self, command, ret_code):
+        self.ret_code = ret_code
+        super().__init__(f'{command} failed: error code {ret_code}')
 
 
 class LogOutput:
@@ -83,14 +114,14 @@ async def _read_stream(stream, callback):
             break
 
 
-async def run_cmd_async(cmd, cwd, env=None, fail=True, liveupdate=True):
+async def run_cmd_async(cmd, cwd, env=None, fail=True, liveupdate=False):
     """
         Run a command asynchronously.
     """
 
     env = env or get_context().environ
     cmdstr = ' '.join(cmd)
-    logging.info('%s$ %s', cwd, cmdstr)
+    logging.debug('%s$ %s', cwd, cmdstr)
 
     logo = LogOutput(liveupdate)
 
@@ -107,7 +138,8 @@ async def run_cmd_async(cmd, cwd, env=None, fail=True, liveupdate=True):
             cwd=cwd,
             env=env,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=os.setpgrp)
     except FileNotFoundError as ex:
         if fail:
             raise ex
@@ -117,25 +149,40 @@ async def run_cmd_async(cmd, cwd, env=None, fail=True, liveupdate=True):
             raise ex
         return (errno.EPERM, str(ex))
 
+    # Process termination is a complicated thing. We need to ensure that
+    # the event-loop ThreadedChildWatcher thread fires before the loop is
+    # terminated. The best we can do it to ask the process to terminate
+    # (SIGINT) and wait for it. We need to shield the process wait to avoid
+    # that it is killed by the cancellation of the task, as we want a
+    # controlled termination. Forced terminations can leak an orphaned process.
+    # https://github.com/pytest-dev/pytest-asyncio/issues/708#issuecomment-1868488942
     tasks = [
         asyncio.ensure_future(_read_stream(process.stdout, logo.log_stdout)),
         asyncio.ensure_future(_read_stream(process.stderr, logo.log_stderr))
     ]
-    await asyncio.wait(tasks)
-    ret = await process.wait()
+
+    try:
+        await asyncio.gather(*[asyncio.shield(t) for t in tasks])
+        ret = await asyncio.shield(process.wait())
+    except asyncio.CancelledError:
+        process.terminate()
+        logging.debug('Command "%s" cancelled', cmdstr)
+        await process.wait()
+        raise
 
     if ret and fail:
-        msg = 'Command "{cwd}$ {cmd}" failed'.format(cwd=cwd, cmd=cmdstr)
+        msg = f'Command "{cwd}$ {cmdstr}" failed'
         if logo.stderr:
             msg += '\n--- Error summary ---\n'
             for line in logo.stderr:
                 msg += line
         logging.error(msg)
+        raise CommandExecError(cmd, ret)
 
     return (ret, ''.join(logo.stdout))
 
 
-def run_cmd(cmd, cwd, env=None, fail=True, liveupdate=True):
+def run_cmd(cmd, cwd, env=None, fail=True, liveupdate=False):
     """
         Runs a command synchronously.
     """
@@ -144,7 +191,7 @@ def run_cmd(cmd, cwd, env=None, fail=True, liveupdate=True):
     (ret, output) = loop.run_until_complete(
         run_cmd_async(cmd, cwd, env, fail, liveupdate))
     if ret and fail:
-        sys.exit(ret)
+        raise CommandExecError(cmd, ret)
     return (ret, output)
 
 
@@ -171,11 +218,10 @@ def repos_fetch(repos):
         tasks.append(asyncio.ensure_future(repo.fetch_async()))
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(asyncio.wait(tasks))
-
-    for task in tasks:
-        if task.result():
-            sys.exit(task.result())
+    try:
+        loop.run_until_complete(asyncio.gather(*tasks))
+    except CommandExecError as e:
+        raise TaskExecError('fetch repos', e.ret_code)
 
 
 def repos_apply_patches(repos):
@@ -190,11 +236,64 @@ def repos_apply_patches(repos):
         tasks.append(asyncio.ensure_future(repo.apply_patches_async()))
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(asyncio.wait(tasks))
+    try:
+        loop.run_until_complete(asyncio.gather(*tasks))
+    except CommandExecError as e:
+        raise TaskExecError('apply patches', e.ret_code)
 
-    for task in tasks:
-        if task.result():
-            sys.exit(task.result())
+
+def get_buildtools_upstream():
+    arch = platform.machine()
+    ctx = get_context()
+    conf_buildtools = get_context().config.get_buildtools()
+    release = conf_buildtools['release']
+
+    if conf_buildtools['base_url']:
+        base_url = conf_buildtools['base_url']
+    else:
+        yocto_releases = "https://downloads.yoctoproject.org/releases/yocto"
+        base_url = f"{yocto_releases}/yocto-{release}/buildtools/"
+
+    if conf_buildtools['filename']:
+        filename = conf_buildtools['filename']
+    else:
+        filename = f"{arch}-buildtools-extended-nativesdk-standalone-{release}.sh"
+
+    # Enable extended buildtools tarball
+    buildtools_url = f"{base_url}/{quote(filename)}"
+    tmpbuildtools = os.path.join(conf_buildtools['dir'], filename)
+
+    logging.info(f"Downloading Buildtools {release}")
+    # Download installer
+    fetch_cmd = ['wget', '-q', '-O', tmpbuildtools, buildtools_url]
+    (ret, _) = run_cmd(fetch_cmd, cwd=ctx.kas_work_dir)
+
+    # Make installer executable
+    st = os.stat(tmpbuildtools)
+    os.chmod(tmpbuildtools, st.st_mode | stat.S_IEXEC)
+
+    # Run installer
+    installer_cmd = [tmpbuildtools, '-d', conf_buildtools['dir'], '-y']
+    env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}
+    (ret, _) = run_cmd(installer_cmd, cwd=ctx.kas_work_dir, env=env)
+    if ret != 0:
+        raise InitBuildEnvError("Could not run buildtools installer")
+
+
+def get_buildtools_version():
+    conf_buildtools = get_context().config.get_buildtools()
+    version_file = glob.glob(os.path.join(conf_buildtools['dir'], "version-*"))
+
+    if len(version_file) == 1:
+        version_file = os.path.realpath(version_file[0])
+    else:
+        logging.warning("Unable to read buildtools version.")
+        return -1
+
+    with open(version_file, 'r') as f:
+        lines = f.readlines()
+
+    return lines[1].split(':')[1].strip()
 
 
 def get_build_environ(build_system):
@@ -217,22 +316,51 @@ def get_build_environ(build_system):
     for (repo, script) in permutations:
         if os.path.exists(repo.path + '/' + script):
             if init_repo:
-                logging.error('Multiple init scripts found (%s vs. %s). ',
-                              repo.name, init_repo.name)
-                logging.error('Resolve ambiguity by removing one of the repos')
-                sys.exit(1)
+                raise InitBuildEnvError(
+                    'Multiple init scripts found '
+                    f'({repo.name} vs. {init_repo.name}). '
+                    'Resolve ambiguity by removing one of the repos')
+
             init_repo = repo
             init_script = script
     if not init_repo:
-        logging.error('Did not find any init-build-env script')
-        sys.exit(1)
+        raise InitBuildEnvError('Did not find any init-build-env script')
+
+    conf_buildtools = get_context().config.get_buildtools()
+
+    buildtools_env = ""
+    if "dir" in conf_buildtools:
+        if not os.listdir(conf_buildtools['dir']):
+            # Directory is empty, try to fetch from upstream
+            logging.info(f"Buildtools ({conf_buildtools['dir']}): directory is empty")
+            if "release" in conf_buildtools:
+                get_buildtools_upstream()
+            else:
+                raise InitBuildEnvError('Unable to fetch buildtools from upstream:'
+                                        'release was not set')
+        else:
+            # Directory is not empty: fetch buildtools if the versions don't match
+            if "release" in conf_buildtools:
+                found_version = get_buildtools_version()
+                if found_version != conf_buildtools['release']:
+                    logging.warning("Buildtools: release mismatch")
+                    logging.info(f"Release: {conf_buildtools['release']}")
+                    logging.info(f"Found version: {found_version}")
+                    shutil.rmtree(os.path.realpath(conf_buildtools['dir']))
+                    os.makedirs(os.path.realpath(conf_buildtools['dir']))
+                    get_buildtools_upstream()
+
+        envfiles = glob.glob(os.path.join(conf_buildtools['dir'], "environment-setup-*"))
+        if len(envfiles) == 1:
+            buildtools_env = "source {}\n".format(os.path.realpath(envfiles[0]))
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        script = """#!/bin/bash
+        script = f"""#!/bin/bash
         set -e
-        source %s $1 > /dev/null
+        {buildtools_env}
+        source {init_script} $1 > /dev/null
         env
-        """ % init_script
+        """
 
         get_bb_env_file = pathlib.Path(temp_dir) / "get_bb_env"
         get_bb_env_file.write_text(script)
@@ -242,7 +370,7 @@ def get_build_environ(build_system):
         env['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
 
         (_, output) = run_cmd([str(get_bb_env_file), get_context().build_dir],
-                              cwd=init_repo.path, env=env, liveupdate=False)
+                              cwd=init_repo.path, env=env)
 
     env = {}
     for line in output.splitlines():
@@ -254,7 +382,7 @@ def get_build_environ(build_system):
 
     conf_env = get_context().config.get_environment()
 
-    env_vars = ['SSTATE_DIR', 'DL_DIR', 'TMPDIR']
+    env_vars = ['SSTATE_DIR', 'SSTATE_MIRRORS', 'DL_DIR', 'TMPDIR']
     env_vars.extend(conf_env)
 
     env.update(conf_env)
@@ -303,24 +431,24 @@ def ssh_add_key(env, key):
                     stderr=PIPE, env=env)
     (_, error) = process.communicate(input=str.encode(key))
     if process.returncode and error:
-        logging.error('failed to add ssh key: %s', error)
+        logging.error('failed to add ssh key: %s', error.decode('utf-8'))
 
 
 def ssh_cleanup_agent():
     """
         Removes the identities and stops the ssh-agent instance
     """
-    env = get_context().environ
+    ctx = get_context()
     # remove the identities
-    process = Popen(['ssh-add', '-D'], env=env)
-    process.wait()
-    if process.returncode != 0:
+    (ret, _) = run_cmd(['ssh-add', '-D'], cwd=ctx.kas_work_dir,
+                       env=ctx.environ, fail=False)
+    if ret != 0:
         logging.error('failed to delete SSH identities')
 
     # stop the ssh-agent
-    process = Popen(['ssh-agent', '-k'], env=env)
-    process.wait()
-    if process.returncode != 0:
+    (ret, _) = run_cmd(['ssh-agent', '-k'], cwd=ctx.kas_work_dir,
+                       env=ctx.environ, fail=False)
+    if ret != 0:
         logging.error('failed to stop SSH agent')
 
 
@@ -328,10 +456,12 @@ def ssh_setup_agent(envkeys=None):
     """
         Starts the ssh-agent
     """
-    env = get_context().environ
+    ctx = get_context()
+    env = ctx.environ
     envkeys = envkeys or ['SSH_PRIVATE_KEY', 'SSH_PRIVATE_KEY_FILE']
-    output = os.popen('ssh-agent -s').readlines()
-    for line in output:
+    (_, output) = run_cmd(['ssh-agent', '-s'], env=env,
+                          cwd=ctx.kas_work_dir)
+    for line in output.split('\n'):
         matches = re.search(r"(\S+)\=(\S+)\;", line)
         if matches:
             env[matches.group(1)] = matches.group(2)
@@ -342,13 +472,13 @@ def ssh_setup_agent(envkeys=None):
             key_path = os.environ.get(envkey)
             if key_path:
                 found = True
-                logging.info("adding SSH key")
+                logging.info(f"adding SSH key from file '{key_path}'")
                 ssh_add_key_file(env, key_path)
         else:
             key = os.environ.get(envkey)
             if key:
                 found = True
-                logging.info("adding SSH key")
+                logging.info("adding SSH key from env-var 'SSH_PRIVATE_KEY'")
                 ssh_add_key(env, key)
 
     if found is not True:
@@ -380,25 +510,75 @@ def ssh_no_host_key_check():
 
 
 def setup_parser_common_args(parser):
+    from kas.libcmds import Macro
+
+    setup_cmds = [str(s) for (s, _) in Macro().setup_commands]
     parser.add_argument('config',
-                        help='Config file, using .config.yaml in KAS_WORK_DIR '
-                        'if none is specified',
+                        help='Config file(s), separated by colon. Using '
+                        '.config.yaml in KAS_WORK_DIR if none is specified.',
                         nargs='?')
     parser.add_argument('--skip',
-                        help='Skip build steps',
-                        default=[])
+                        help='Skip build steps. To skip more than one step, '
+                        'use this argument multiple times.',
+                        default=[],
+                        action='append',
+                        metavar='STEP',
+                        choices=setup_cmds)
     parser.add_argument('--force-checkout', action='store_true',
-                        help='Always checkout the desired refspec of each '
-                        'repository, discarding any local changes')
+                        help='Always checkout the desired commit/branch/tag '
+                        'of each repository, discarding any local changes')
     parser.add_argument('--update', action='store_true',
                         help='Pull new upstream changes to the desired '
-                        'refspec even if it is already checked out locally')
+                        'branch even if it is already checked out locally')
 
 
 def setup_parser_preserve_env_arg(parser):
     parser.add_argument('-E', '--preserve-env',
                         help='Keep current user environment block',
                         action='store_true')
+
+
+class ExtendConstAction(argparse._AppendConstAction):
+    """Add an 'extend_const' action similar to 'append_const'.
+
+    Based on the existing 'append_const' and 'extend' actions.
+    """
+    def __init__(self, option_strings, dest, const, default=None,
+                 required=False, help=None, metavar=None):
+        super(argparse._AppendConstAction, self).__init__(
+            option_strings=option_strings, dest=dest, nargs=0, const=const,
+            default=default, required=required, help=help, metavar=metavar)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = getattr(namespace, self.dest, None)
+        if items is None:
+            items = []
+
+        if isinstance(items, list):
+            items = items[:]
+        else:
+            import copy
+            items = copy.copy(items)
+
+        items.extend(self.const)
+        setattr(namespace, self.dest, items)
+
+
+def setup_parser_keep_config_unchanged_arg(parser):
+    # Skip the tasks which would change the config of the build
+    # environment
+    steps = [
+        'setup_dir',
+        'finish_setup_repos',
+        'repos_checkout',
+        'repos_apply_patches',
+        'write_bbconfig',
+    ]
+    parser.add_argument('-k', '--keep-config-unchanged',
+                        help='Skip steps that change the configuration',
+                        action=ExtendConstAction,
+                        dest='skip',
+                        const=steps)
 
 
 def run_handle_preserve_env_arg(ctx, os, args, SetupHome):
@@ -412,9 +592,8 @@ def run_handle_preserve_env_arg(ctx, os, args, SetupHome):
                                 var)
 
         if not os.isatty(sys.stdout.fileno()):
-            logging.error("Error: --preserve-env can only be "
-                          "run from a tty")
-            sys.exit(1)
+            raise EnvNotValidError(
+                '--preserve-env can only be run from a tty')
 
         ctx.environ = os.environ.copy()
 

@@ -24,46 +24,101 @@
 import os
 import shutil
 import pathlib
+import subprocess
 import re
+import pytest
 from kas import kas
+from kas.context import create_global_context
+from kas.kasusererror import ArgsCombinationError
 
 
-def test_build_dir_is_placed_inside_work_dir_by_default(changedir, tmpdir):
-    conf_dir = str(tmpdir.mkdir('test_env_variables'))
-    shutil.rmtree(conf_dir, ignore_errors=True)
+def test_build_dir_is_placed_inside_work_dir_by_default(monkeykas, tmpdir):
+    conf_dir = str(tmpdir / 'test_env_variables')
     shutil.copytree('tests/test_environment_variables', conf_dir)
 
-    os.chdir(conf_dir)
+    monkeykas.chdir(conf_dir)
 
     kas.kas(['checkout', 'test.yml'])
 
     assert os.path.exists(os.path.join(os.getcwd(), 'build', 'conf'))
 
 
-def test_build_dir_can_be_specified_by_environment_variable(changedir, tmpdir):
-    conf_dir = str(tmpdir.mkdir('test_env_variables'))
-    build_dir = str(tmpdir.mkdir('test_build_dir'))
-    shutil.rmtree(conf_dir, ignore_errors=True)
+def test_build_dir_can_be_specified_by_environment_variable(monkeykas, tmpdir):
+    conf_dir = str(tmpdir / 'test_env_variables')
+    build_dir = str(tmpdir / 'test_build_dir')
     shutil.copytree('tests/test_environment_variables', conf_dir)
-    shutil.rmtree(build_dir, ignore_errors=True)
-    os.chdir(conf_dir)
+    monkeykas.chdir(conf_dir)
 
-    os.environ['KAS_BUILD_DIR'] = build_dir
+    monkeykas.setenv('KAS_BUILD_DIR', build_dir)
     kas.kas(['checkout', 'test.yml'])
-    del os.environ['KAS_BUILD_DIR']
 
     assert os.path.exists(os.path.join(build_dir, 'conf'))
 
 
-def _test_env_section_export(changedir, tmpdir, bb_env_var, bb_repo):
-    conf_dir = pathlib.Path(str(tmpdir.mkdir('test_env_variables')))
+def test_ssh_agent_setup(monkeykas, tmpdir, capsys):
+    conf_dir = str(tmpdir / 'test_ssh_agent_setup')
+    shutil.copytree('tests/test_environment_variables', conf_dir)
+    monkeykas.chdir(conf_dir)
+
+    SSH_AUTH_SOCK = '/tmp/ssh-KLTafE/agent.64708'
+
+    with monkeykas.context() as mp:
+        envfile = tmpdir / 'env'
+        mp.setenv('SSH_AUTH_SOCK', SSH_AUTH_SOCK)
+        kas.kas(['shell', '-c', f'env > {envfile}', 'test.yml'])
+        env = _get_env_from_file(envfile)
+        assert env['SSH_AUTH_SOCK'] == SSH_AUTH_SOCK
+
+    with monkeykas.context() as mp:
+        mp.setenv('SSH_AUTH_SOCK', SSH_AUTH_SOCK)
+        mp.setenv('SSH_PRIVATE_KEY', 'id_rsa')
+        with pytest.raises(ArgsCombinationError):
+            kas.kas(['checkout', 'test.yml'])
+
+    privkey_file = f'{tmpdir}/id_ecdsa_test'
+    genkey_cmd = ['ssh-keygen', '-f', privkey_file, '-N', '', '-t', 'ecdsa']
+    subprocess.check_call(genkey_cmd)
+    # ensure we also get the info messages
+    log = kas.logging.getLogger()
+    log.setLevel(kas.logging.INFO)
+    # flush the captured output
+    capsys.readouterr()
+    with monkeykas.context() as mp:
+        mp.setenv('SSH_PRIVATE_KEY_FILE', privkey_file)
+        kas.kas(['checkout', 'test.yml'])
+        out = capsys.readouterr().err
+        assert 'adding SSH key from file' in out
+        assert 'ERROR' not in out
+
+    with monkeykas.context() as mp:
+        privkey = pathlib.Path(privkey_file).read_text()
+        mp.setenv('SSH_PRIVATE_KEY', privkey)
+        kas.kas(['checkout', 'test.yml'])
+        out = capsys.readouterr().err
+        assert 'adding SSH key from env-var' in out
+        assert 'ERROR' not in out
+
+
+def _get_env_from_file(filename):
+    env = {}
+    with filename.open() as f:
+        for line in f.readlines():
+            key, val = line.split("=", 1)
+            env[key] = val.strip()
+    return env
+
+
+def _test_env_section_export(monkeykas, tmpdir, bb_env_var, bb_repo):
+    conf_dir = pathlib.Path(str(tmpdir / 'test_env_variables'))
     env_out = conf_dir / 'env_out'
     bb_env_out = conf_dir / 'bb_env_out'
     init_build_env = conf_dir / 'oe-init-build-env'
 
-    shutil.rmtree(str(conf_dir), ignore_errors=True)
     shutil.copytree('tests/test_environment_variables', str(conf_dir))
-    os.chdir(str(conf_dir))
+    monkeykas.chdir(conf_dir)
+    monkeykas.setenv('KAS_CLONE_DEPTH', '1')
+    monkeykas.setenv('KAS_PREMIRRORS', 'https://git\\.openembedded\\.org/ '
+                     'https://github.com/openembedded/\n')
 
     # Overwrite oe-init-build-env script
     # BB_ENV_* filter variables are only exported by
@@ -84,11 +139,7 @@ def _test_env_section_export(changedir, tmpdir, bb_env_var, bb_repo):
     kas.kas(['shell', '-c', 'bitbake -e > %s' % bb_env_out, 'test_env.yml'])
 
     # Check kas environment
-    test_env = {}
-    with env_out.open() as f:
-        for line in f.readlines():
-            key, val = line.split("=", 1)
-            test_env[key] = val.strip()
+    test_env = _get_env_from_file(env_out)
 
     # Variables with 'None' assigned should not be added to environment
     try:
@@ -116,11 +167,36 @@ def _test_env_section_export(changedir, tmpdir, bb_env_var, bb_repo):
 
 
 # BB_ENV_EXTRAWHITE is deprecated but may still be used
-def test_env_section_export_bb_extra_white(changedir, tmpdir):
-    _test_env_section_export(changedir, tmpdir, 'BB_ENV_EXTRAWHITE',
+@pytest.mark.online
+def test_env_section_export_bb_extra_white(monkeykas, tmpdir):
+    _test_env_section_export(monkeykas, tmpdir, 'BB_ENV_EXTRAWHITE',
                              'bitbake_old')
 
 
-def test_env_section_export_bb_env_passthrough_additions(changedir, tmpdir):
-    _test_env_section_export(changedir, tmpdir, 'BB_ENV_PASSTHROUGH_ADDITIONS',
+@pytest.mark.online
+def test_env_section_export_bb_env_passthrough_additions(monkeykas, tmpdir):
+    _test_env_section_export(monkeykas, tmpdir, 'BB_ENV_PASSTHROUGH_ADDITIONS',
                              'bitbake_new')
+
+
+def test_managed_env_detection(monkeykas):
+    with monkeykas.context() as mp:
+        mp.setenv('GITLAB_CI', 'true')
+        ctx = create_global_context([])
+        me = ctx.managed_env
+        assert bool(me)
+        assert str(me) == 'GitLab CI'
+    with monkeykas.context() as mp:
+        mp.setenv('GITHUB_ACTIONS', 'true')
+        ctx = create_global_context([])
+        me = ctx.managed_env
+        assert bool(me)
+        assert str(me) == 'GitHub Actions'
+    with monkeykas.context() as mp:
+        mp.setenv('REMOTE_CONTAINERS', 'true')
+        mp.setenv('REMOTE_CONTAINERS_FOO', 'bar')
+        ctx = create_global_context([])
+        me = ctx.managed_env
+        assert bool(me)
+        assert str(me) == 'VSCode Remote Containers'
+        assert ctx.environ['REMOTE_CONTAINERS_FOO'] == 'bar'

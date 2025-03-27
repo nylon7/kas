@@ -1,3 +1,113 @@
+4.5
+- kas: avoid bitbake parsing due to non-deterministic layer patches
+- kas: correctly handle upstream ff merges on fetch
+- kas: keep git committer identity if provided in .gitconfig
+- kas: add support for container registry authentication
+- kas: Improve GitLab CI rewrite rules for git
+- kas-container: Use official snapshot.debian.org
+- kas-container: Fix positional argument processing with for-all-repos
+- kas-container: allow recent Ubuntu builds via isar
+- kas-container: re-add deterministic metadata
+- docs: document difference between file and env credentials
+- sign pip packages on release
+
+4.4
+- kas: Auto-import runner-provided .gitconfig also inside GitLab-CI
+- kas: Auto-inject git credentials on gitlab ci
+- kas: Add --keep-config-unchanged to preserve repos and configs on actions
+- kas: Fix --skip'ing multiple steps
+- kas: List --skip'able steps in --help
+- kas: Add support for shallow clones
+- kas: Add support to create provenance build attestations
+- kas: Add config key to describe build artifacts (used by attestation)
+- kas: Add option to dump-plugin to include VCS info of local repos
+- kas-container: Handle missing extra argument in subcommands gracefully
+- kas-container: improve container reproduction using git commit date
+- docs: Several format improvements
+- docs: Add simple examples
+
+4.3.2
+- kas: don't add comments to .netrc, fixing gitlab-ci
+- kas: make file permissions on credentials more strict (not a security fix)
+- kas: align hg semantics of repo dirty checking
+- kas-container: fix warnings from shellcheck 0.9.0
+- docs: do not build docs against installed version
+- docs: update to match bitbake variable changes
+- docs: unify spelling of kas
+- docs: document scope of environment variables
+
+4.3.1
+- kas: Fix regression of 4.3 when using SSH_PRIVATE_KEY[_FILE]
+- kas-container: Update to debian:bookworm-20240311-slim (implicitly)
+
+4.3
+- kas: fix including from transitively referenced repos
+- kas: Add support for .gitconfig pass-through
+- kas: Optimize checkout of repos in larger configurations
+- kas: Reduce verbosity of kas startup output
+- kas: check if branch contains commit if both are set
+- kas: Improve error reporting in several places
+- kas-container: Bit-identically reproducible images
+- kas-container: Enrich manifests with provenance information
+- kas-container: Add bash completion for kas
+- docs: Separate man pages per subcommand
+- docs: Various smaller improvements
+
+4.2
+- kas: Fix lock files when references repos by tags
+- kas: add forgotten `tag` key to repos `defaults`
+- kas: add support for OAuth2 worflow
+- kas-container: add python3-websockets
+- kas-container: unify error handling
+
+4.1
+- kas: Add "tag" property to repo, to replace usage of refspec
+- kas: generalize revision locking to all included files
+- kas: allow for --skip repos_checkout
+- kas: forward SSTATE_MIRRORS environment variable
+- kas: Allow PyYAML 6, fixing dependency conflicts
+- kas: Add Python 3.12 support
+- kas: Update jsonschema upper version limit
+- kas: menu plugin: Reorder help and exit buttons
+- kas: menu plugin: Add separate return button for submenus
+- kas: Fix Mercurial's branch resolution
+- kas-container: detect build system on clean commands
+- kas-container: report error if ssh-agent is requested but not running
+
+4.0
+- kas container: Switch to Debian bookworm
+- kas-container: Make kas-isar ready for mmdebstrap
+
+3.3
+- kas: Introduce commit and branch as alternative to refspec key
+- kas: Warn if a repo uses legacy refspec
+- kas: add support for lock files via dump plugin
+- kas: track root repo dir config files of menu plugin
+- kas: add support for --log-level argument
+- kas: add GIT_CREDENTIAL_USEHTTPPATH environment variable
+- kas: improve error reporting
+- kas: drop support for Python 3.5
+- kas-container: fix invocations with --isar for some layers
+- kas-container: Purge tmp* on clean
+- kas-container: enable colored logging
+
+3.2.3
+- kas-container: mount KAS_REPO_REF_DIR rw to support auto-creation
+- kas-container: fix --ssh-dir (3.2.2 regression)
+- container: Use original UID/GID when run without kas-container (3.2.2 regression)
+
+3.2.2
+- kas-container: Start as non-root when running without kas-container
+- kas-container: Disable git safe.directory when running without kas-container
+- kas-container: Make sure privileged podman will find sbin tools
+- docs: Leave notice on inherit integrity weaknesses of repo fetches
+- docs: Add a SECURITY.md
+
+3.2.1
+- kas-container: Add unzip package to kas-base
+- docs: Fix description of container image generation
+- docs: Fix description of bblayers_conf_header and local_conf_header
+
 3.2
 - kas: add conditional, default-free environment variables
 - kas: add plugin to dump flattened config and resolve repo refs

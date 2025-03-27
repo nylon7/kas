@@ -20,8 +20,9 @@
 import os
 import sys
 
-# Add the project directory to the path, in order to include it:
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Prepend the project directory to the path, in order to include it:
+sys.path.insert(0,
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import kas  # noqa (disables pycodestyle check for this line)
 
 # -- General configuration ------------------------------------------------
@@ -38,6 +39,7 @@ extensions = [
     'sphinx.ext.coverage',
     'sphinx.ext.viewcode',
     'sphinxarg.ext',
+    'sphinx_rtd_theme',
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -58,7 +60,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'kas'
-copyright = 'Siemens AG, 2017-2018'
+copyright = 'Siemens AG, 2017-2024'
 author = 'Daniel Wagner, Jan Kiszka, Claudius Heine'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -75,7 +77,7 @@ release = kas.__version__
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = 'en'
 
 # There are two options for replacing |today|: either, you set today to some
 # non-false value, then it is used:
@@ -89,7 +91,9 @@ language = None
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', '_man']
+if tags.has('man'):  # noqa: F821
+    exclude_patterns.remove('_man')
 
 # The reST default role (used for this markup: `text`) to use for all
 # documents.
@@ -316,8 +320,37 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    (master_doc, 'kas', 'kas Documentation',
-     [author], 1)
+    ('_man/kas', 'kas', 'a setup tool for bitbake based projects',
+     [author], 1),
+    ('_man/kas-container',
+     'kas-container', 'a setup tool for bitbake based projects',
+     [author], 1),
+    ('_man/kas-plugin-build', 'kas-build', 'kas build plugin',
+     [author], 1),
+    ('_man/kas-plugin-checkout', 'kas-checkout', 'kas checkout plugin',
+     [author], 1),
+    ('_man/kas-plugin-dump', 'kas-dump', 'kas dump plugin',
+     [author], 1),
+    ('_man/kas-plugin-for-all-repos',
+     'kas-for-all-repos', 'kas for-all-repos plugin',
+     [author], 1),
+    ('_man/kas-plugin-lock', 'kas-lock', 'kas lock plugin',
+     [author], 1),
+    ('_man/kas-plugin-menu', 'kas-menu', 'kas menu plugin',
+     [author], 1),
+    ('_man/kas-plugin-shell', 'kas-shell', 'kas shell plugin',
+     [author], 1),
+    ('_man/kas-project-config',
+     'kas-project-config', 'kas project configuration',
+     [author], 1),
+    ('_man/kas-format-changelog',
+     'kas-format-changelog', 'project configuration changelog',
+     [author], 1),
+    ('_man/kas-credentials', 'kas-credentials', 'kas credential handling',
+     [author], 1),
+    ('_man/kas-build-attestation',
+     'kas-build-attestation', 'working with SLSA / in-toto attestations',
+     [author], 1),
 ]
 
 # If true, show URL addresses after external links.
